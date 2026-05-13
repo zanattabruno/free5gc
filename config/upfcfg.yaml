@@ -18,7 +18,7 @@ gtpu:
   # If you bind to a specific IP, ensure SMF uses the same IP in its N3 configuration.
   # If you bind to all (0.0.0.0), SMF can use any of the available UPF IPs, but do not use 0.0.0.0 in SMF.
   ifList:
-    - addr: 127.0.0.8
+    - addr: 10.43.0.220
       type: N3
       # name: upf.5gc.nctu.me
       # ifname: gtpif

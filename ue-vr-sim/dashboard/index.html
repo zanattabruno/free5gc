@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>5G VR Network Monitor</title>
+    <meta name="description" content="Real-time VR network performance monitoring dashboard for 5G free5GC with NWDAF analytics">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+    <!-- Top Bar -->
+    <header id="topbar">
+        <div class="topbar-left">
+            <svg class="vr-icon" viewBox="0 0 40 28" fill="none"><rect x="2" y="6" width="36" height="18" rx="6" stroke="currentColor" stroke-width="2.5"/><circle cx="13" cy="15" r="5" stroke="currentColor" stroke-width="2"/><circle cx="27" cy="15" r="5" stroke="currentColor" stroke-width="2"/><path d="M18 15 Q20 20 22 15" stroke="currentColor" stroke-width="2"/><path d="M14 6V3a2 2 0 014 0v3M22 6V3a2 2 0 014 0v3" stroke="currentColor" stroke-width="2"/></svg>
+            <h1>5G VR Network Monitor</h1>
+        </div>
+        <div class="topbar-center">
+            <div class="status-pill" id="sessionCountPill">
+                <span class="dot green"></span>
+                <span id="sessionCountText">0 Active Sessions</span>
+            </div>
+            <span class="clock" id="clock">--:--:--</span>
+        </div>
+        <div class="topbar-right">
+            <div class="status-pill" id="nwdafStatus">
+                <span class="dot" id="nwdafDot"></span>
+                <span id="nwdafText">NWDAF Checking...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Stat Cards -->
+    <section id="stat-cards" class="row">
+        <div class="card stat-card" id="card-throughput">
+            <div class="stat-header">
+                <span class="stat-label">Total Throughput</span>
+                <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            </div>
+            <div class="stat-value"><span id="totalThroughput">0</span> <small>Mbps</small></div>
+            <canvas id="sparkTP" height="30"></canvas>
+        </div>
+        <div class="card stat-card" id="card-latency">
+            <div class="stat-header">
+                <span class="stat-label">Avg Latency</span>
+                <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            </div>
+            <div class="stat-value"><span id="avgLatency">0</span> <small>ms</small></div>
+            <div class="stat-indicator" id="latencyIndicator">● Good</div>
+        </div>
+        <div class="card stat-card" id="card-mos">
+            <div class="stat-header">
+                <span class="stat-label">MOS Score</span>
+            </div>
+            <div class="mos-row">
+                <div class="stat-value"><span id="mosValue">0</span><small>/5.0</small></div>
+                <div class="mos-gauge-wrap">
+                    <svg class="mos-gauge" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="34" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="6"/>
+                        <circle id="mosArc" cx="40" cy="40" r="34" fill="none" stroke="url(#mosGrad)" stroke-width="6" stroke-linecap="round" stroke-dasharray="0 214" transform="rotate(-90 40 40)"/>
+                        <defs><linearGradient id="mosGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#14b8a6"/><stop offset="100%" stop-color="#6366f1"/></linearGradient></defs>
+                        <text x="40" y="44" text-anchor="middle" fill="white" font-size="14" font-weight="700" id="mosPercent">0%</text>
+                    </svg>
+                </div>
+            </div>
+            <div class="stat-indicator mos-label" id="mosLabel">N/A</div>
+        </div>
+    </section>
+
+    <!-- Charts -->
+    <section id="charts-row" class="row">
+        <div class="card chart-card wide">
+            <h2>VR Session Throughput (Mbps)</h2>
+            <div class="chart-container"><canvas id="throughputChart"></canvas></div>
+        </div>
+        <div class="card chart-card">
+            <h2>E2E Latency Distribution</h2>
+            <div class="chart-container"><canvas id="latencyHeatmap"></canvas></div>
+        </div>
+    </section>
+
+    <!-- Bottom Panels -->
+    <section id="bottom-row" class="row three-col">
+        <div class="card table-card">
+            <h2>Active VR Sessions</h2>
+            <div class="table-wrap">
+                <table id="sessionsTable">
+                    <thead><tr>
+                        <th>Session</th><th>Profile</th><th>UE IP</th><th>Throughput</th><th>Latency</th><th>Status</th>
+                    </tr></thead>
+                    <tbody id="sessionsBody"></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="card analytics-card">
+            <h2>Network Analytics <small>(NWDAF→NEF)</small></h2>
+            <div class="analytics-item">
+                <span>QoS Sustainability</span>
+                <div class="analytics-bar-wrap">
+                    <div class="analytics-bar" id="qosBar" style="width:0%"></div>
+                    <span class="analytics-val" id="qosVal">0%</span>
+                </div>
+            </div>
+            <div class="analytics-item">
+                <span>Anomaly Detection</span>
+                <span class="analytics-status green" id="anomalyStatus">No data</span>
+            </div>
+            <div class="analytics-item">
+                <span>Congestion Level</span>
+                <div class="analytics-bar-wrap">
+                    <div class="analytics-bar congestion" id="congestionBar" style="width:0%"></div>
+                    <span class="analytics-val" id="congestionVal">0%</span>
+                </div>
+            </div>
+            <div class="analytics-item">
+                <span>Avg Packet Loss</span>
+                <span class="analytics-val" id="pktLossVal">0%</span>
+            </div>
+        </div>
+        <div class="card controls-card">
+            <h2>Session Controls</h2>
+            <label for="profileSelect">VR Profile</label>
+            <select id="profileSelect">
+                <option value="360_VIDEO">360° Video</option>
+                <option value="INTERACTIVE_VR" selected>Interactive VR</option>
+                <option value="CLOUD_GAMING">Cloud VR Gaming</option>
+            </select>
+            <label for="ueCountSlider">Number of UEs: <span id="ueCountVal">1</span></label>
+            <input type="range" id="ueCountSlider" min="1" max="10" value="1">
+            <button class="btn btn-primary" id="btnStartSession">▶ Start Session</button>
+            <button class="btn btn-danger" id="btnStopAll">■ Stop All</button>
+        </div>
+    </section>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -54,7 +54,7 @@ fi
 
 function terminate()
 {
-    rm run.pid
+    rm -f run.pid
     sudo rm -f /tmp/config.json # CHF ChargingGatway FTP config
     echo "Receive SIGINT, terminating..."
     if [ $N3IWF_ENABLE -ne 0 ] || [ $TNGF_ENABLE -ne 0 ]; then
@@ -69,9 +69,17 @@ function terminate()
         done
     fi
     
-    echo Terminate PID_LIST = ${PID_LIST[@]}
-    wait ${PID_LIST[@]}
-    echo The free5GC terminated successfully!
+    echo "Terminate PID_LIST = ${PID_LIST[@]}"
+    # Kill all processes first
+    for PID in ${PID_LIST[@]}; do
+        kill $PID 2>/dev/null
+        sudo kill $PID 2>/dev/null
+    done
+    # Wait only on child processes (skip sudo-spawned PIDs that aren't children)
+    for PID in ${PID_LIST[@]}; do
+        wait $PID 2>/dev/null
+    done
+    echo "The free5GC terminated successfully!"
     exit 0
 }
 
@@ -141,7 +149,7 @@ mongosh "$DB_NAME" --eval "$MONGO_SCRIPT"
 
 sleep 0.1
 
-NF_LIST="nrf amf smf udr pcf udm nssf ausf chf nef"
+NF_LIST="nrf amf smf udr pcf udm nssf ausf chf nef nwdaf"
 
 # Add BSF to the list only if enabled
 if [ $BSF_ENABLE -ne 0 ]; then

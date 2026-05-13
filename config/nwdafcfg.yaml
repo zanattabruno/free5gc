@@ -1,0 +1,21 @@
+info:
+  version: 1.0.0
+  description: NWDAF initial local configuration
+
+configuration:
+  sbi:
+    scheme: http
+    registerIPv4: 127.0.0.15
+    bindingIPv4: 127.0.0.15
+    port: 8000
+  nrfUri: http://127.0.0.10:8000
+  serviceList:
+    - serviceName: nnwdaf-eventssubscription
+    - serviceName: nnwdaf-analyticsinfo
+  analytics:
+    retentionSeconds: 300
+    calculationIntervalMs: 1000
+
+logger:
+  enable: true
+  level: info
