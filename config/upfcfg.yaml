@@ -27,11 +27,12 @@ gtpu:
 # Supported DNNs
 # List of Data Network Names (DNN) supported by this UPF.
 dnnList:
-  - dnn: internet # Data Network Name
-    cidr: 10.60.0.0/16 # Classless Inter-Domain Routing for assigned IPv4 pool of UE
-  - dnn: internet # Data Network Name
-    cidr: 10.61.0.0/16 # Classless Inter-Domain Routing for assigned IPv4 pool of UE
-    # natifname: eth0
+  - dnn: internet # 360° Video slice pool
+    cidr: 10.60.0.0/16
+  - dnn: internet # Interactive VR slice pool
+    cidr: 10.61.0.0/16
+  - dnn: internet # Cloud VR Gaming slice pool
+    cidr: 10.62.0.0/16
 
 # Logging Configuration
 # Controls logging level and output for the UPF.

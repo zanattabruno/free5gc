@@ -21,22 +21,30 @@ configuration:
     - nsmf-event-exposure # Nsmf_EventExposure service
     - nsmf-oam # OAM service
 
-  # the S-NSSAI (Single Network Slice Selection Assistance Information) list supported by this AMF
+  # S-NSSAI configuration — one per VR profile
   snssaiInfos:
-    - sNssai: # S-NSSAI (Single Network Slice Selection Assistance Information)
-        sst: 1 # Slice/Service Type (uinteger, range: 0~255)
-        sd: 010203 # Slice Differentiator (3 bytes hex string, range: 000000~FFFFFF)
-      dnnInfos: # DNN information list
-        - dnn: internet # Data Network Name
-          dns: # the IP address of DNS
+    - sNssai: # 360° Video slice
+        sst: 1
+        sd: 000001
+      dnnInfos:
+        - dnn: internet
+          dns:
             ipv4: 8.8.8.8
             ipv6: 2001:4860:4860::8888
-    - sNssai: # S-NSSAI (Single Network Slice Selection Assistance Information)
-        sst: 1 # Slice/Service Type (uinteger, range: 0~255)
-        sd: 112233 # Slice Differentiator (3 bytes hex string, range: 000000~FFFFFF)
-      dnnInfos: # DNN information list
-        - dnn: internet # Data Network Name
-          dns: # the IP address of DNS
+    - sNssai: # Interactive VR slice
+        sst: 1
+        sd: 000002
+      dnnInfos:
+        - dnn: internet
+          dns:
+            ipv4: 8.8.8.8
+            ipv6: 2001:4860:4860::8888
+    - sNssai: # Cloud VR Gaming slice (URLLC)
+        sst: 2
+        sd: 000001
+      dnnInfos:
+        - dnn: internet
+          dns:
             ipv4: 8.8.8.8
             ipv6: 2001:4860:4860::8888
 
@@ -66,28 +74,28 @@ configuration:
         nodeID: 127.0.0.8 # the Node ID of this UPF
         addr: 127.0.0.8 # the IP/FQDN of N4 interface on this UPF (PFCP)
         sNssaiUpfInfos: # S-NSSAI information list for this UPF
-          - sNssai: # S-NSSAI (Single Network Slice Selection Assistance Information)
-              sst: 1 # Slice/Service Type (uinteger, range: 0~255)
-              sd: 010203 # Slice Differentiator (3 bytes hex string, range: 000000~FFFFFF)
-            dnnUpfInfoList: # DNN information list for this S-NSSAI
+          - sNssai: # 360° Video slice
+              sst: 1
+              sd: 000001
+            dnnUpfInfoList:
               - dnn: internet
                 pools:
                   - cidr: 10.60.0.0/16
-                staticPools:
-                  - cidr: 10.60.100.0/24
-          - sNssai: # S-NSSAI (Single Network Slice Selection Assistance Information)
-              sst: 1 # Slice/Service Type (uinteger, range: 0~255)
-              sd: 112233 # Slice Differentiator (3 bytes hex string, range: 000000~FFFFFF)
-            dnnUpfInfoList: # DNN information list for this S-NSSAI
+          - sNssai: # Interactive VR slice
+              sst: 1
+              sd: 000002
+            dnnUpfInfoList:
               - dnn: internet
                 pools:
                   - cidr: 10.61.0.0/16
-                staticPools:
-                  - cidr: 10.61.100.0/24
+          - sNssai: # Cloud VR Gaming slice (URLLC)
+              sst: 2
+              sd: 000001
+            dnnUpfInfoList:
+              - dnn: internet
+                pools:
+                  - cidr: 10.62.0.0/16
         # The IP address for the N3 interface must match the IP bound in the UPF N3 interface.
-        # If UPF binds to a specific IP, set that same IP here.
-        # If UPF binds to all IPs (0.0.0.0), you can set any of the available UPF IPs here.
-        # Do NOT set 0.0.0.0 as this is not a valid routable address.
         interfaces: # Interface list for this UPF
           - interfaceType: N3 # the type of the interface (N3 or N9)
             endpoints: # the IP address of this N3/N9 interface on this UPF
