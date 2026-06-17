@@ -11,8 +11,8 @@ BSF_ENABLE=0
 PID_LIST=()
 echo $$ > run.pid
 
-sudo -v # cache credentials
-if [ $? == 1 ] # check if credentials were successfully cached
+sudo -n true # check if we can run sudo
+if [ $? -ne 0 ] # check if sudo is available non-interactively
 then
     echo "[ERRO] Without root permission, you cannot run free5GC"
     exit 1

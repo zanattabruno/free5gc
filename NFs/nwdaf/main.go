@@ -67,21 +67,24 @@ type SessionAnalytics struct {
 	AvgPacketLoss float64 `json:"avgPacketLossPercent"`
 	MOSScore      float64 `json:"mosScore"`
 	SampleCount   int     `json:"sampleCount"`
+	PredictedMOS  float64 `json:"predictedMOS"`
+	QoSSustained  bool    `json:"qosSustained"`
 }
 
 type AnalyticsResult struct {
-	EventType         string             `json:"eventType"`
-	Timestamp         string             `json:"timestamp"`
-	OverallMOS        float64            `json:"overallMOS"`
-	AvgThroughput     float64            `json:"avgThroughputMbps"`
-	AvgLatency        float64            `json:"avgLatencyMs"`
-	AvgJitter         float64            `json:"avgJitterMs"`
-	AvgPacketLoss     float64            `json:"avgPacketLossPercent"`
-	QoSSustainability float64            `json:"qosSustainability"`
-	AnomalyDetected   bool               `json:"anomalyDetected"`
-	AnomalyDetails    string             `json:"anomalyDetails,omitempty"`
-	CongestionLevel   float64            `json:"congestionLevel"`
-	SessionAnalytics  []SessionAnalytics `json:"sessionAnalytics"`
+	EventType           string             `json:"eventType"`
+	Timestamp           string             `json:"timestamp"`
+	OverallMOS          float64            `json:"overallMOS"`
+	OverallPredictedMOS float64            `json:"overallPredictedMOS"`
+	AvgThroughput       float64            `json:"avgThroughputMbps"`
+	AvgLatency          float64            `json:"avgLatencyMs"`
+	AvgJitter           float64            `json:"avgJitterMs"`
+	AvgPacketLoss       float64            `json:"avgPacketLossPercent"`
+	QoSSustainability   float64            `json:"qosSustainability"`
+	AnomalyDetected     bool               `json:"anomalyDetected"`
+	AnomalyDetails      string             `json:"anomalyDetails,omitempty"`
+	CongestionLevel     float64            `json:"congestionLevel"`
+	SessionAnalytics    []SessionAnalytics `json:"sessionAnalytics"`
 }
 
 type EventSubscription struct {
@@ -172,6 +175,27 @@ func CalculateMOS(throughput, latency, jitter, packetLoss float64) float64 {
 	return 1.0 + 4.0*raw // Scale to 1-5
 }
 
+// linearRegressionSlope computes the slope of the data points using linear regression
+func linearRegressionSlope(data []float64) float64 {
+	n := float64(len(data))
+	if n < 5 {
+		return 0.0
+	}
+	var sumX, sumY, sumXY, sumXX float64
+	for i, y := range data {
+		x := float64(i)
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumXX += x * x
+	}
+	denom := n*sumXX - sumX*sumX
+	if denom == 0 {
+		return 0.0
+	}
+	return (n*sumXY - sumX*sumY) / denom
+}
+
 func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -182,7 +206,8 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 	}
 
 	var totalT, totalL, totalJ, totalP float64
-	var totalMOS float64
+	var totalMOS, totalPredMOS float64
+	sustainedCount := 0
 	sessionCount := 0
 
 	for sid, metrics := range e.metrics {
@@ -197,11 +222,21 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		recent := metrics[start:]
 
 		var sT, sL, sJ, sP float64
-		for _, m := range recent {
+		throughputs := make([]float64, len(recent))
+		latencies := make([]float64, len(recent))
+		jitters := make([]float64, len(recent))
+		packetLosses := make([]float64, len(recent))
+
+		for i, m := range recent {
 			sT += m.Throughput
 			sL += m.Latency
 			sJ += m.Jitter
 			sP += m.PacketLoss
+
+			throughputs[i] = m.Throughput
+			latencies[i] = m.Latency
+			jitters[i] = m.Jitter
+			packetLosses[i] = m.PacketLoss
 		}
 		n := float64(len(recent))
 		avgT := sT / n
@@ -210,15 +245,55 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		avgP := sP / n
 		mos := CalculateMOS(avgT, avgL, avgJ, avgP)
 
+		// Option B: Predictive Analytics
+		slopeT := linearRegressionSlope(throughputs)
+		slopeL := linearRegressionSlope(latencies)
+		slopeJ := linearRegressionSlope(jitters)
+		slopeP := linearRegressionSlope(packetLosses)
+
+		// Predict 10 steps (5 seconds) into the future
+		kSteps := 10.0
+		predT := math.Max(0, throughputs[len(throughputs)-1]+slopeT*kSteps)
+		predL := math.Max(0, latencies[len(latencies)-1]+slopeL*kSteps)
+		predJ := math.Max(0, jitters[len(jitters)-1]+slopeJ*kSteps)
+		predP := math.Max(0, math.Min(100, packetLosses[len(packetLosses)-1]+slopeP*kSteps))
+
+		predMOS := CalculateMOS(predT, predL, predJ, predP)
+
+		// 3GPP QoS Target definitions for Sustainability check
+		var targetT, targetL, targetP float64
+		prof := recent[len(recent)-1].Profile
+		switch prof {
+		case "CLOUD_GAMING":
+			targetT = 300.0
+			targetL = 15.0
+			targetP = 0.1
+		case "INTERACTIVE_VR":
+			targetT = 150.0
+			targetL = 20.0
+			targetP = 0.3
+		default: // 360_VIDEO
+			targetT = 75.0
+			targetL = 25.0
+			targetP = 0.5
+		}
+
+		qosSustained := predT >= targetT && predL <= targetL && predP <= targetP
+		if qosSustained {
+			sustainedCount++
+		}
+
 		sa := SessionAnalytics{
 			SessionID:     sid,
-			Profile:       recent[len(recent)-1].Profile,
+			Profile:       prof,
 			AvgThroughput: math.Round(avgT*100) / 100,
 			AvgLatency:    math.Round(avgL*100) / 100,
 			AvgJitter:     math.Round(avgJ*100) / 100,
 			AvgPacketLoss: math.Round(avgP*1000) / 1000,
 			MOSScore:      math.Round(mos*100) / 100,
 			SampleCount:   len(recent),
+			PredictedMOS:  math.Round(predMOS*100) / 100,
+			QoSSustained:  qosSustained,
 		}
 		result.SessionAnalytics = append(result.SessionAnalytics, sa)
 
@@ -227,6 +302,7 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		totalJ += avgJ
 		totalP += avgP
 		totalMOS += mos
+		totalPredMOS += predMOS
 		sessionCount++
 	}
 
@@ -237,13 +313,17 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		result.AvgJitter = math.Round(totalJ/n*100) / 100
 		result.AvgPacketLoss = math.Round(totalP/n*1000) / 1000
 		result.OverallMOS = math.Round(totalMOS/n*100) / 100
-		result.QoSSustainability = math.Round(math.Min(result.OverallMOS/5.0*100, 100)*10) / 10
+		result.OverallPredictedMOS = math.Round(totalPredMOS/n*100) / 100
+		result.QoSSustainability = math.Round((float64(sustainedCount)/n)*100.0*10) / 10
 		result.CongestionLevel = math.Round(math.Max(0, math.Min(100, result.AvgPacketLoss*20+result.AvgLatency/2))*10) / 10
 
-		// Anomaly detection: latency spike or throughput drop
+		// Anomaly detection: latency spike/packet loss OR prediction warning
 		if result.AvgLatency > 20 || result.AvgPacketLoss > 1.0 {
 			result.AnomalyDetected = true
 			result.AnomalyDetails = fmt.Sprintf("High latency (%.1fms) or packet loss (%.2f%%)", result.AvgLatency, result.AvgPacketLoss)
+		} else if result.OverallPredictedMOS < 3.0 || result.QoSSustainability < 70.0 {
+			result.AnomalyDetected = true
+			result.AnomalyDetails = fmt.Sprintf("Predicted QoS warning (Overall Pred MOS: %.2f, Sust: %.1f%%)", result.OverallPredictedMOS, result.QoSSustainability)
 		}
 	}
 
