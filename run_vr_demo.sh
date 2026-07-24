@@ -47,7 +47,7 @@ fi
 
 # 2. Start VR Simulator + Dashboard
 echo "[2/3] Starting VR Simulator (API :9090, Dashboard :3000)..."
-"${BASEDIR}/bin/ue-vr-sim" -c "${BASEDIR}/ue-vr-sim/config/vrsimcfg.yaml" &
+"${BASEDIR}/bin/ue-vr-sim" -c "${BASEDIR}/../ue-vr-sim/config/vrsimcfg.yaml" &
 PID_LIST+=($!)
 sleep 1
 

@@ -44,6 +44,45 @@ var Profiles = map[string]VRProfile{
 	},
 }
 
+// ── External Network Impairment ────────────────────────────────────────────
+// Injected by the experiment runner (or dashboard) so that tc/iperf network
+// impairment is reflected in the reported VR session metrics and, in turn, in
+// the NWDAF MOS. ThroughputFactor is a multiplier in (0, 1]; 1.0 means no
+// reduction. The additive fields are added on top of each profile's baseline.
+
+type Impairment struct {
+	AddedLatencyMs     float64 `json:"addedLatencyMs"`
+	AddedJitterMs      float64 `json:"addedJitterMs"`
+	AddedPacketLossPct float64 `json:"addedPacketLossPct"`
+	ThroughputFactor   float64 `json:"throughputFactor"`
+}
+
+var (
+	currentImpairment   = Impairment{ThroughputFactor: 1.0}
+	currentImpairmentMu sync.RWMutex
+)
+
+func getImpairment() Impairment {
+	currentImpairmentMu.RLock()
+	defer currentImpairmentMu.RUnlock()
+	return currentImpairment
+}
+
+func setImpairment(imp Impairment) {
+	if imp.ThroughputFactor <= 0 {
+		imp.ThroughputFactor = 1.0
+	}
+	currentImpairmentMu.Lock()
+	currentImpairment = imp
+	currentImpairmentMu.Unlock()
+}
+
+func clearImpairment() {
+	currentImpairmentMu.Lock()
+	currentImpairment = Impairment{ThroughputFactor: 1.0}
+	currentImpairmentMu.Unlock()
+}
+
 // ── VR Session ─────────────────────────────────────────────────────────────
 
 type VRSession struct {
@@ -127,6 +166,15 @@ func (s *VRSession) Tick() {
 	if rand.Float64() < 0.08 {
 		packetLoss = rand.Float64() * 0.5
 	}
+
+	// Apply externally injected network impairment (tc/iperf coupling).
+	imp := getImpairment()
+	if imp.ThroughputFactor > 0 && imp.ThroughputFactor != 1.0 {
+		baseThroughput *= imp.ThroughputFactor
+	}
+	latency += imp.AddedLatencyMs
+	jitter += imp.AddedJitterMs
+	packetLoss += imp.AddedPacketLossPct
 
 	s.currentTP = math.Round(baseThroughput*100) / 100
 	s.currentLat = math.Round(latency*100) / 100
@@ -353,6 +401,32 @@ func apiGetProfiles(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(Profiles)
 }
 
+func apiImpairment(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(getImpairment())
+	case "POST", "PUT":
+		imp := Impairment{ThroughputFactor: 1.0}
+		if err := json.NewDecoder(r.Body).Decode(&imp); err != nil {
+			http.Error(w, `{"error":"invalid impairment payload"}`, 400)
+			return
+		}
+		setImpairment(imp)
+		log.Printf("[VR-SIM] Impairment set: +%.1fms lat, +%.1fms jit, +%.2f%% loss, x%.2f tput",
+			imp.AddedLatencyMs, imp.AddedJitterMs, imp.AddedPacketLossPct, imp.ThroughputFactor)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(getImpairment())
+	case "DELETE":
+		clearImpairment()
+		log.Printf("[VR-SIM] Impairment cleared")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(getImpairment())
+	default:
+		http.Error(w, "Method not allowed", 405)
+	}
+}
+
 func apiGetAggregated(w http.ResponseWriter, r *http.Request) {
 	simEngine.mu.RLock()
 	defer simEngine.mu.RUnlock()
@@ -438,6 +512,7 @@ func main() {
 	apiMux.HandleFunc("/api/sessions/history", apiGetSessionHistory)
 	apiMux.HandleFunc("/api/profiles", apiGetProfiles)
 	apiMux.HandleFunc("/api/aggregated", apiGetAggregated)
+	apiMux.HandleFunc("/api/impairment", apiImpairment)
 
 	go func() {
 		log.Printf("[VR-SIM] API server on %s", apiAddr)
@@ -478,6 +553,8 @@ func main() {
 			apiGetProfiles(w, r)
 		case r.URL.Path == "/api/aggregated":
 			apiGetAggregated(w, r)
+		case r.URL.Path == "/api/impairment":
+			apiImpairment(w, r)
 		default:
 			http.Error(w, "Not found", 404)
 		}
