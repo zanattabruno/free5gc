@@ -59,21 +59,23 @@ type MetricsBatch struct {
 }
 
 type SessionAnalytics struct {
-	SessionID     string  `json:"sessionId"`
-	Profile       string  `json:"profile"`
-	AvgThroughput float64 `json:"avgThroughputMbps"`
-	AvgLatency    float64 `json:"avgLatencyMs"`
-	AvgJitter     float64 `json:"avgJitterMs"`
-	AvgPacketLoss float64 `json:"avgPacketLossPercent"`
-	MOSScore      float64 `json:"mosScore"`
-	SampleCount   int     `json:"sampleCount"`
-	PredictedMOS  float64 `json:"predictedMOS"`
-	QoSSustained  bool    `json:"qosSustained"`
+	SessionID                string  `json:"sessionId"`
+	Profile                  string  `json:"profile"`
+	AvgThroughput            float64 `json:"avgThroughputMbps"`
+	AvgLatency               float64 `json:"avgLatencyMs"`
+	AvgJitter                float64 `json:"avgJitterMs"`
+	AvgPacketLoss            float64 `json:"avgPacketLossPercent"`
+	MOSScore                 float64 `json:"mosScore"`
+	SampleCount              int     `json:"sampleCount"`
+	ProfileWindowSampleCount int     `json:"profileWindowSampleCount"`
+	PredictedMOS             float64 `json:"predictedMOS"`
+	QoSSustained             bool    `json:"qosSustained"`
 }
 
 type AnalyticsResult struct {
 	EventType           string             `json:"eventType"`
 	Timestamp           string             `json:"timestamp"`
+	MOSModelVersion     string             `json:"mosModelVersion"`
 	OverallMOS          float64            `json:"overallMOS"`
 	OverallPredictedMOS float64            `json:"overallPredictedMOS"`
 	AvgThroughput       float64            `json:"avgThroughputMbps"`
@@ -85,6 +87,14 @@ type AnalyticsResult struct {
 	AnomalyDetails      string             `json:"anomalyDetails,omitempty"`
 	CongestionLevel     float64            `json:"congestionLevel"`
 	SessionAnalytics    []SessionAnalytics `json:"sessionAnalytics"`
+}
+
+const MOSModelVersion = "profile-relative-v2"
+
+var profileIdealThroughputMbps = map[string]float64{
+	"360_VIDEO":      75.0,
+	"INTERACTIVE_VR": 150.0,
+	"CLOUD_GAMING":   300.0,
 }
 
 type EventSubscription struct {
@@ -160,10 +170,14 @@ func (e *AnalyticsEngine) RemoveSession(sessionID string) {
 	delete(e.lastSeen, sessionID)
 }
 
-// CalculateMOS computes a VR-specific MOS score (1.0-5.0)
-func CalculateMOS(throughput, latency, jitter, packetLoss float64) float64 {
-	// Throughput factor: VR needs >50 Mbps, ideal >200 Mbps
-	tFactor := math.Min(throughput/200.0, 1.0)
+// CalculateMOS computes a profile-relative VR MOS score (1.0-5.0).
+func CalculateMOS(profile string, throughput, latency, jitter, packetLoss float64) float64 {
+	targetThroughput, ok := profileIdealThroughputMbps[profile]
+	if !ok {
+		targetThroughput = 200.0
+	}
+	// Throughput quality is relative to the workload's own delivery target.
+	tFactor := math.Max(0, math.Min(throughput/targetThroughput, 1.0))
 	// Latency factor: VR needs <20ms, ideal <5ms
 	lFactor := math.Max(0, 1.0-latency/30.0)
 	// Jitter factor: VR needs <5ms, ideal <1ms
@@ -173,6 +187,25 @@ func CalculateMOS(throughput, latency, jitter, packetLoss float64) float64 {
 
 	raw := 0.35*tFactor + 0.30*lFactor + 0.20*jFactor + 0.15*pFactor
 	return 1.0 + 4.0*raw // Scale to 1-5
+}
+
+// currentProfileWindow returns up to maxSamples from the newest contiguous
+// profile segment. Measurements from an old workload must not dilute the MOS
+// immediately after adaptation.
+func currentProfileWindow(metrics []VRMetrics, maxSamples int) []VRMetrics {
+	if len(metrics) == 0 || maxSamples <= 0 {
+		return nil
+	}
+	latestProfile := metrics[len(metrics)-1].Profile
+	lowerBound := len(metrics) - maxSamples
+	if lowerBound < 0 {
+		lowerBound = 0
+	}
+	start := len(metrics) - 1
+	for start > lowerBound && metrics[start-1].Profile == latestProfile {
+		start--
+	}
+	return metrics[start:]
 }
 
 // linearRegressionSlope computes the slope of the data points using linear regression
@@ -201,8 +234,9 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 	defer e.mu.RUnlock()
 
 	result := &AnalyticsResult{
-		EventType: eventType,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		EventType:       eventType,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		MOSModelVersion: MOSModelVersion,
 	}
 
 	var totalT, totalL, totalJ, totalP float64
@@ -214,12 +248,8 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		if len(metrics) == 0 {
 			continue
 		}
-		// Use last 50 samples (or fewer)
-		start := 0
-		if len(metrics) > 50 {
-			start = len(metrics) - 50
-		}
-		recent := metrics[start:]
+		// Use only the newest contiguous profile segment, capped at 50 samples.
+		recent := currentProfileWindow(metrics, 50)
 
 		var sT, sL, sJ, sP float64
 		throughputs := make([]float64, len(recent))
@@ -243,7 +273,8 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		avgL := sL / n
 		avgJ := sJ / n
 		avgP := sP / n
-		mos := CalculateMOS(avgT, avgL, avgJ, avgP)
+		prof := recent[len(recent)-1].Profile
+		mos := CalculateMOS(prof, avgT, avgL, avgJ, avgP)
 
 		// Option B: Predictive Analytics
 		slopeT := linearRegressionSlope(throughputs)
@@ -258,11 +289,10 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		predJ := math.Max(0, jitters[len(jitters)-1]+slopeJ*kSteps)
 		predP := math.Max(0, math.Min(100, packetLosses[len(packetLosses)-1]+slopeP*kSteps))
 
-		predMOS := CalculateMOS(predT, predL, predJ, predP)
+		predMOS := CalculateMOS(prof, predT, predL, predJ, predP)
 
 		// 3GPP QoS Target definitions for Sustainability check
 		var targetT, targetL, targetP float64
-		prof := recent[len(recent)-1].Profile
 		switch prof {
 		case "CLOUD_GAMING":
 			targetT = 300.0
@@ -284,16 +314,17 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		}
 
 		sa := SessionAnalytics{
-			SessionID:     sid,
-			Profile:       prof,
-			AvgThroughput: math.Round(avgT*100) / 100,
-			AvgLatency:    math.Round(avgL*100) / 100,
-			AvgJitter:     math.Round(avgJ*100) / 100,
-			AvgPacketLoss: math.Round(avgP*1000) / 1000,
-			MOSScore:      math.Round(mos*100) / 100,
-			SampleCount:   len(recent),
-			PredictedMOS:  math.Round(predMOS*100) / 100,
-			QoSSustained:  qosSustained,
+			SessionID:                sid,
+			Profile:                  prof,
+			AvgThroughput:            math.Round(avgT*100) / 100,
+			AvgLatency:               math.Round(avgL*100) / 100,
+			AvgJitter:                math.Round(avgJ*100) / 100,
+			AvgPacketLoss:            math.Round(avgP*1000) / 1000,
+			MOSScore:                 math.Round(mos*100) / 100,
+			SampleCount:              len(recent),
+			ProfileWindowSampleCount: len(recent),
+			PredictedMOS:             math.Round(predMOS*100) / 100,
+			QoSSustained:             qosSustained,
 		}
 		result.SessionAnalytics = append(result.SessionAnalytics, sa)
 
@@ -375,9 +406,9 @@ func sendNotification(uri string, notif *EventNotification) {
 
 func registerWithNRF() error {
 	profile := map[string]interface{}{
-		"nfInstanceId": cfg.NfInstID,
-		"nfType":       "NWDAF",
-		"nfStatus":     "REGISTERED",
+		"nfInstanceId":  cfg.NfInstID,
+		"nfType":        "NWDAF",
+		"nfStatus":      "REGISTERED",
 		"ipv4Addresses": []string{cfg.RegisterIP},
 		"nfServices": []map[string]interface{}{
 			{
@@ -516,11 +547,11 @@ func handleSessionRemoval(w http.ResponseWriter, r *http.Request) {
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":     "healthy",
-		"nfType":     "NWDAF",
-		"nfInstID":   cfg.NfInstID,
+		"status":      "healthy",
+		"nfType":      "NWDAF",
+		"nfInstID":    cfg.NfInstID,
 		"numSessions": len(engine.metrics),
-		"numSubs":    len(engine.subscriptions),
+		"numSubs":     len(engine.subscriptions),
 	})
 }
 
