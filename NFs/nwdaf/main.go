@@ -60,6 +60,7 @@ type MetricsBatch struct {
 
 type SessionAnalytics struct {
 	SessionID                string  `json:"sessionId"`
+	LastSampleAt             string  `json:"lastSampleAt,omitempty"`
 	Profile                  string  `json:"profile"`
 	AvgThroughput            float64 `json:"avgThroughputMbps"`
 	AvgLatency               float64 `json:"avgLatencyMs"`
@@ -315,6 +316,7 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 
 		sa := SessionAnalytics{
 			SessionID:                sid,
+			LastSampleAt:             recent[len(recent)-1].Timestamp,
 			Profile:                  prof,
 			AvgThroughput:            math.Round(avgT*100) / 100,
 			AvgLatency:               math.Round(avgL*100) / 100,

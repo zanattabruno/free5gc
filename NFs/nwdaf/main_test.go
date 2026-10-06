@@ -3,7 +3,25 @@ package main
 import (
 	"math"
 	"testing"
+	"time"
 )
+
+func TestAnalyticsPreservesInputTimestampWhenQueriedAgain(t *testing.T) {
+	engine := NewAnalyticsEngine()
+	old := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	engine.IngestMetrics([]VRMetrics{{SessionID: "stale-session", Timestamp: old, Profile: "INTERACTIVE_VR", Throughput: 150, Latency: 5}})
+	for i := 0; i < 2; i++ {
+		result := engine.ComputeAnalytics("SERVICE_EXPERIENCE")
+		if len(result.SessionAnalytics) != 1 || result.SessionAnalytics[0].LastSampleAt != old {
+			t.Fatalf("query refreshed the input timestamp: %+v", result.SessionAnalytics)
+		}
+	}
+	newest := time.Now().UTC().Format(time.RFC3339Nano)
+	engine.IngestMetrics([]VRMetrics{{SessionID: "stale-session", Timestamp: newest, Profile: "INTERACTIVE_VR", Throughput: 150, Latency: 5}})
+	if got := engine.ComputeAnalytics("SERVICE_EXPERIENCE").SessionAnalytics[0].LastSampleAt; got != newest {
+		t.Fatalf("new sample not reflected: %s", got)
+	}
+}
 
 func TestCalculateMOSIsProfileRelative(t *testing.T) {
 	video := CalculateMOS("360_VIDEO", 100, 5, 1, 0)
