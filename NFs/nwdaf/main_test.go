@@ -98,4 +98,56 @@ func TestComputeAnalyticsResetsWindowAtProfileChange(t *testing.T) {
 	if session.MOSScore < 4.5 {
 		t.Fatalf("old impaired samples diluted post-change MOS: %.2f", session.MOSScore)
 	}
+	if session.ForecastReady {
+		t.Fatal("a new profile must collect five samples before its slope is ready")
+	}
+}
+
+func TestAnalyticsExposesForecastEvidenceAndTargetFailures(t *testing.T) {
+	engine := NewAnalyticsEngine()
+	for i := 0; i < 5; i++ {
+		engine.IngestMetrics([]VRMetrics{{SessionID: "vr", Profile: "INTERACTIVE_VR",
+			Throughput: 170 - float64(i), Latency: 10 + float64(i), PacketLoss: .1, Jitter: 1}})
+	}
+	result := engine.ComputeAnalytics("SERVICE_EXPERIENCE")
+	forecast := result.Forecast
+	if forecast.HorizonSamples != 10 || forecast.NominalHorizonSec != 5 || forecast.MinSamples != 5 {
+		t.Fatalf("missing sample-based horizon: %+v", forecast)
+	}
+	s := result.SessionAnalytics[0]
+	if !s.ForecastReady || s.QoSSustained {
+		t.Fatalf("expected a ready forecast failing its latency target: %+v", s)
+	}
+	checks := s.QoSTargets
+	if checks.Throughput.Predicted != 156 || checks.Throughput.Target != 150 || !checks.Throughput.Met {
+		t.Fatalf("unexpected throughput evidence: %+v", checks.Throughput)
+	}
+	if checks.Latency.Predicted != 24 || checks.Latency.Target != 20 || checks.Latency.Met {
+		t.Fatalf("unexpected latency evidence: %+v", checks.Latency)
+	}
+	if checks.PacketLoss.Target != .3 || !checks.PacketLoss.Met {
+		t.Fatalf("unexpected packet loss target: %+v", checks.PacketLoss)
+	}
+	if s.PredictedMOS != math.Round(CalculateMOS("INTERACTIVE_VR", 156, 24, 1, .1)*100)/100 {
+		t.Fatalf("forecast MOS disagrees with exposed components: %+v", s)
+	}
+}
+
+func TestQoSTargetEqualityAndWarmup(t *testing.T) {
+	for _, test := range []struct {
+		profile                   string
+		throughput, latency, loss float64
+	}{{"CLOUD_GAMING", 300, 15, .1}, {"INTERACTIVE_VR", 150, 20, .3}, {"360_VIDEO", 75, 25, .5}} {
+		t.Run(test.profile, func(t *testing.T) {
+			engine := NewAnalyticsEngine()
+			for count := 1; count <= 5; count++ {
+				engine.IngestMetrics([]VRMetrics{{SessionID: "vr", Profile: test.profile,
+					Throughput: test.throughput, Latency: test.latency, PacketLoss: test.loss}})
+				s := engine.ComputeAnalytics("SERVICE_EXPERIENCE").SessionAnalytics[0]
+				if s.ForecastReady != (count >= 5) || !s.QoSSustained || !s.QoSTargets.Throughput.Met || !s.QoSTargets.Latency.Met || !s.QoSTargets.PacketLoss.Met {
+					t.Fatalf("incorrect readiness or inclusive target bounds with %d samples: %+v", count, s)
+				}
+			}
+		})
+	}
 }

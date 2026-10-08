@@ -56,6 +56,7 @@ type snssai struct {
 }
 
 type Configuration struct {
+	Lab   bool   `yaml:"lab"`
 	N2Amf *n2Amf `yaml:"n2Amf,omitempty"`
 
 	N2Ran *n2Ran `yaml:"n2Ran,omitempty"`
@@ -153,8 +154,12 @@ func ueRanEmulator() error {
 	fmt.Printf("[UERANEM] Connect to AMF successfully\n")
 
 	// RAN connect to UPF
-	upfConn, err := test.ConnectToUpf(
-		uerancfg.N3Ran.Addr, uerancfg.N3Upf.Addr, int(uerancfg.N3Ran.Port), int(uerancfg.N3Upf.Port))
+	var upfConn *net.UDPConn
+	if uerancfg.Lab {
+		upfConn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(uerancfg.N3Ran.Addr), Port: int(uerancfg.N3Ran.Port)})
+	} else {
+		upfConn, err = test.ConnectToUpf(uerancfg.N3Ran.Addr, uerancfg.N3Upf.Addr, int(uerancfg.N3Ran.Port), int(uerancfg.N3Upf.Port))
+	}
 	if err != nil {
 		err = fmt.Errorf("ConnectToUpf: %v", err)
 		return err
@@ -169,6 +174,9 @@ func ueRanEmulator() error {
 
 	// send NGSetupRequest Msg
 	sendMsg, err = test.GetNGSetupRequest([]byte("\x00\x01\x02"), 24, "free5gc")
+	if uerancfg.Lab {
+		sendMsg, err = labNGSetup()
+	}
 	if err != nil {
 		err = fmt.Errorf("GetNGSetupRequest: %v", err)
 		return err
@@ -196,12 +204,17 @@ func ueRanEmulator() error {
 		models.AccessType__3_GPP_ACCESS)
 	ue.AmfUeNgapId = uerancfg.NgapID
 	ue.AuthenticationSubs = test.GetAuthSubscription(uerancfg.K, uerancfg.Opc, uerancfg.Op)
+	if uerancfg.Lab {
+		if err := provisionLab(ue); err != nil {
+			return err
+		}
+	}
 
 	mobileIdentity5GS := encodeSuci([]byte(strings.TrimPrefix(uerancfg.Supi, "imsi-")), len(uerancfg.Mnc))
 
 	ueSecurityCapability := ue.GetUESecurityCapability()
 	registrationRequest := nasTestpacket.GetRegistrationRequest(nasMessage.RegistrationType5GSInitialRegistration,
-		*mobileIdentity5GS, nil, ueSecurityCapability, nil, nil, nil)
+		*mobileIdentity5GS, nil, ueSecurityCapability, ue.Get5GMMCapability(), nil, nil)
 	sendMsg, err = test.GetInitialUEMessage(ue.RanUeNgapId, registrationRequest, "")
 	if err != nil {
 		return err
@@ -262,7 +275,7 @@ func ueRanEmulator() error {
 
 	// send NAS Security Mode Complete Msg
 	registrationRequestWith5GMM := nasTestpacket.GetRegistrationRequest(nasMessage.RegistrationType5GSInitialRegistration,
-		*mobileIdentity5GS, nil, ueSecurityCapability, nil, nil, nil)
+		*mobileIdentity5GS, nil, ueSecurityCapability, ue.Get5GMMCapability(), nil, nil)
 	pdu = nasTestpacket.GetSecurityModeComplete(registrationRequestWith5GMM)
 	pdu, err = test.EncodeNasPduWithSecurity(
 		ue, pdu, nas.SecurityHeaderTypeIntegrityProtectedAndCipheredWithNew5gNasSecurityContext, true, true)
@@ -356,8 +369,17 @@ func ueRanEmulator() error {
 		return err
 	}
 
+	if uerancfg.Lab {
+		if err := labSetup(ue, upfConn, recvMsg[:n]); err != nil {
+			return err
+		}
+	}
+
 	// send 14. NGAP-PDU Session Resource Setup Response
 	sendMsg, err = test.GetPDUSessionResourceSetupResponse(10, ue.AmfUeNgapId, ue.RanUeNgapId, uerancfg.N3Ran.Addr)
+	if uerancfg.Lab && err == nil {
+		sendMsg, err = currentLab.setupResponse(sendMsg)
+	}
 	if err != nil {
 		return err
 	}
@@ -369,6 +391,10 @@ func ueRanEmulator() error {
 
 	// wait 1s
 	time.Sleep(1 * time.Second)
+
+	if uerancfg.Lab {
+		return currentLab.serve(conn)
+	}
 
 	// infinite loop to send UDP with GTP
 	for {
@@ -409,6 +435,7 @@ func main() {
 	app.Usage = "./ueranem"
 	app.Action = action
 	app.Flags = []cli.Flag{
+		&cli.BoolFlag{Name: "lab-sender"},
 		&cli.StringFlag{
 			Name:    "config",
 			Aliases: []string{"c"},
@@ -440,6 +467,9 @@ func initConfigFactory(f string) error {
 }
 
 func action(c *cli.Context) error {
+	if c.Bool("lab-sender") {
+		return runLabSender()
+	}
 	if err := initConfigFactory(c.String("config")); err != nil {
 		return err
 	}

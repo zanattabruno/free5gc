@@ -59,24 +59,50 @@ type MetricsBatch struct {
 }
 
 type SessionAnalytics struct {
-	SessionID                string  `json:"sessionId"`
-	LastSampleAt             string  `json:"lastSampleAt,omitempty"`
-	Profile                  string  `json:"profile"`
-	AvgThroughput            float64 `json:"avgThroughputMbps"`
-	AvgLatency               float64 `json:"avgLatencyMs"`
-	AvgJitter                float64 `json:"avgJitterMs"`
-	AvgPacketLoss            float64 `json:"avgPacketLossPercent"`
-	MOSScore                 float64 `json:"mosScore"`
-	SampleCount              int     `json:"sampleCount"`
-	ProfileWindowSampleCount int     `json:"profileWindowSampleCount"`
-	PredictedMOS             float64 `json:"predictedMOS"`
-	QoSSustained             bool    `json:"qosSustained"`
+	SessionID                string     `json:"sessionId"`
+	LastSampleAt             string     `json:"lastSampleAt,omitempty"`
+	Profile                  string     `json:"profile"`
+	AvgThroughput            float64    `json:"avgThroughputMbps"`
+	AvgLatency               float64    `json:"avgLatencyMs"`
+	AvgJitter                float64    `json:"avgJitterMs"`
+	AvgPacketLoss            float64    `json:"avgPacketLossPercent"`
+	MOSScore                 float64    `json:"mosScore"`
+	SampleCount              int        `json:"sampleCount"`
+	ProfileWindowSampleCount int        `json:"profileWindowSampleCount"`
+	PredictedMOS             float64    `json:"predictedMOS"`
+	QoSSustained             bool       `json:"qosSustained"`
+	ForecastReady            bool       `json:"forecastReady"`
+	QoSTargets               QoSTargets `json:"qosTargets"`
 }
+
+// Forecasts use sample indices, so the nominal duration assumes 500 ms sampling.
+// Readiness describes the slope estimator; it is not a confidence estimate.
+type ForecastMetadata struct {
+	HorizonSamples    int     `json:"horizonSamples"`
+	NominalHorizonSec float64 `json:"nominalHorizonSec"`
+	MinSamples        int     `json:"minSamples"`
+}
+
+type QoSTargetCheck struct {
+	Predicted float64 `json:"predicted"`
+	Target    float64 `json:"target"`
+	Met       bool    `json:"met"`
+}
+
+type QoSTargets struct {
+	Throughput QoSTargetCheck `json:"throughputMbps"`
+	Latency    QoSTargetCheck `json:"latencyMs"`
+	PacketLoss QoSTargetCheck `json:"packetLossPercent"`
+}
+
+const forecastHorizonSamples = 10
+const forecastMinSamples = 5
 
 type AnalyticsResult struct {
 	EventType           string             `json:"eventType"`
 	Timestamp           string             `json:"timestamp"`
 	MOSModelVersion     string             `json:"mosModelVersion"`
+	Forecast            ForecastMetadata   `json:"forecast"`
 	OverallMOS          float64            `json:"overallMOS"`
 	OverallPredictedMOS float64            `json:"overallPredictedMOS"`
 	AvgThroughput       float64            `json:"avgThroughputMbps"`
@@ -212,7 +238,7 @@ func currentProfileWindow(metrics []VRMetrics, maxSamples int) []VRMetrics {
 // linearRegressionSlope computes the slope of the data points using linear regression
 func linearRegressionSlope(data []float64) float64 {
 	n := float64(len(data))
-	if n < 5 {
+	if n < forecastMinSamples {
 		return 0.0
 	}
 	var sumX, sumY, sumXY, sumXX float64
@@ -238,6 +264,7 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		EventType:       eventType,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		MOSModelVersion: MOSModelVersion,
+		Forecast:        ForecastMetadata{HorizonSamples: forecastHorizonSamples, NominalHorizonSec: 5, MinSamples: forecastMinSamples},
 	}
 
 	var totalT, totalL, totalJ, totalP float64
@@ -283,8 +310,8 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 		slopeJ := linearRegressionSlope(jitters)
 		slopeP := linearRegressionSlope(packetLosses)
 
-		// Predict 10 steps (5 seconds) into the future
-		kSteps := 10.0
+		// Predict ten samples ahead (nominally five seconds at 500 ms sampling).
+		kSteps := float64(forecastHorizonSamples)
 		predT := math.Max(0, throughputs[len(throughputs)-1]+slopeT*kSteps)
 		predL := math.Max(0, latencies[len(latencies)-1]+slopeL*kSteps)
 		predJ := math.Max(0, jitters[len(jitters)-1]+slopeJ*kSteps)
@@ -292,7 +319,7 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 
 		predMOS := CalculateMOS(prof, predT, predL, predJ, predP)
 
-		// 3GPP QoS Target definitions for Sustainability check
+		// Prototype profile targets used by the sustainability check.
 		var targetT, targetL, targetP float64
 		switch prof {
 		case "CLOUD_GAMING":
@@ -327,6 +354,12 @@ func (e *AnalyticsEngine) ComputeAnalytics(eventType string) *AnalyticsResult {
 			ProfileWindowSampleCount: len(recent),
 			PredictedMOS:             math.Round(predMOS*100) / 100,
 			QoSSustained:             qosSustained,
+			ForecastReady:            len(recent) >= forecastMinSamples,
+			QoSTargets: QoSTargets{
+				Throughput: QoSTargetCheck{Predicted: predT, Target: targetT, Met: predT >= targetT},
+				Latency:    QoSTargetCheck{Predicted: predL, Target: targetL, Met: predL <= targetL},
+				PacketLoss: QoSTargetCheck{Predicted: predP, Target: targetP, Met: predP <= targetP},
+			},
 		}
 		result.SessionAnalytics = append(result.SessionAnalytics, sa)
 
