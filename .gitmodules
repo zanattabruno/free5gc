@@ -15,10 +15,10 @@
 	url = https://github.com/free5gc/nssf.git
 [submodule "pcf"]
 	path = NFs/pcf
-	url = https://github.com/free5gc/pcf.git
+	url = https://github.com/zanattabruno/pcf.git
 [submodule "smf"]
 	path = NFs/smf
-	url = https://github.com/free5gc/smf.git
+	url = https://github.com/zanattabruno/smf.git
 [submodule "udm"]
 	path = NFs/udm
 	url = https://github.com/free5gc/udm.git
@@ -27,7 +27,7 @@
 	url = https://github.com/free5gc/udr.git
 [submodule "upf"]
 	path = NFs/upf
-	url = https://github.com/free5gc/go-upf.git
+	url = https://github.com/zanattabruno/go-upf.git
 [submodule "webconsole"]
 	path = webconsole
 	url = https://github.com/free5gc/webconsole.git
