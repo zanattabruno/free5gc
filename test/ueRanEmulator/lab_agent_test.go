@@ -37,3 +37,21 @@ func TestLabUDPIPv4AndGTPFraming(t *testing.T) {
 		}
 	}
 }
+
+func TestSequenceDuplicatesReorderingAndEpoch(t *testing.T) {
+	f := &receivedFlow{}
+	for _, seq := range []uint64{1, 3, 2} {
+		if !f.acceptSequence(4, seq) {
+			t.Fatal("unique sequence rejected")
+		}
+	}
+	if f.lost != 0 || f.unique != 3 || f.reordered != 1 {
+		t.Fatalf("reordered packet counted as loss: %+v", f)
+	}
+	if f.acceptSequence(4, 2) || f.duplicates != 1 || f.unique != 3 {
+		t.Fatal("duplicate counted as delivered")
+	}
+	if !f.acceptSequence(5, 1) || f.unique != 1 || f.lastSeq != 1 {
+		t.Fatal("epoch change not explicit")
+	}
+}

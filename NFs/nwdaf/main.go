@@ -633,6 +633,7 @@ func main() {
 
 	// Set up routes
 	mux := http.NewServeMux()
+	mux.HandleFunc("/nnwdaf-analyticsinfo/v1/lab-evaluate", handleRealEvaluation)
 	mux.HandleFunc("/nwdaf-dataingestion/v1/metrics", handleDataIngestion)
 	mux.HandleFunc("/nwdaf-dataingestion/v1/session", handleSessionRemoval)
 	mux.HandleFunc("/nnwdaf-analyticsinfo/v1/analytics", handleAnalyticsInfo)

@@ -18,6 +18,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"test"
 	"test/ngapTestpacket"
@@ -26,6 +27,7 @@ import (
 
 const labMagic uint32 = 0x514f534c
 const labPayload = 1200
+const labProbeMagic uint32 = 0x51525454
 
 type labFlow struct {
 	ServerIP   string  `json:"serverIp"`
@@ -37,14 +39,25 @@ type labFlow struct {
 	UEIP       string  `json:"ueIp"`
 }
 type labMetric struct {
-	Timestamp    time.Time `json:"timestamp"`
-	Throughput   float64   `json:"throughputMbps"`
-	IPThroughput float64   `json:"ipThroughputMbps"`
-	PacketLoss   float64   `json:"packetLossPercent"`
-	Jitter       float64   `json:"jitterMs"`
-	RTT          *float64  `json:"rttMs,omitempty"`
-	Packets      uint64    `json:"packets"`
-	QFI          uint8     `json:"qfi"`
+	Timestamp       time.Time `json:"timestamp"`
+	Throughput      float64   `json:"throughputMbps"`
+	IPThroughput    float64   `json:"ipThroughputMbps"`
+	PacketLoss      float64   `json:"packetLossPercent"`
+	Jitter          float64   `json:"jitterMs"`
+	RTT             *float64  `json:"rttMs,omitempty"`
+	Packets         uint64    `json:"packets"`
+	QFI             uint8     `json:"qfi"`
+	IntervalSeconds float64   `json:"intervalSeconds"`
+	PayloadBytes    uint64    `json:"payloadBytes"`
+	IPBytes         uint64    `json:"ipBytes"`
+	UniquePackets   uint64    `json:"uniquePacketsTotal"`
+	HighestSequence uint64    `json:"highestSequence"`
+	Duplicates      uint64    `json:"duplicatesTotal"`
+	Reordered       uint64    `json:"reorderedTotal"`
+	RTTCount        uint64    `json:"rttCount"`
+	Epoch           uint64    `json:"epoch"`
+	ExpectedPackets uint64    `json:"expectedPackets"`
+	LossDelta       int64     `json:"lossDelta"`
 }
 type receivedFlow struct {
 	Flow                                           labFlow     `json:"flow"`
@@ -54,6 +67,14 @@ type receivedFlow struct {
 	jitter                                         float64
 	started                                        time.Time
 	qfi                                            uint8
+	seen                                           map[uint64]bool
+	unique, duplicates, reordered                  uint64
+	sampleHighest                                  uint64
+	sampleMissing                                  int64
+	rttSum                                         float64
+	rttCount                                       uint64
+	lastRTT                                        *float64
+	lastRTTAt                                      time.Time
 }
 type labAgent struct {
 	mu         sync.Mutex
@@ -161,7 +182,11 @@ func (a *labAgent) serve(n2 *sctp.SCTPConn) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", a.status)
 	mux.HandleFunc("/flows", a.flowControl)
-	server := &http.Server{Addr: "127.0.0.1:9092", Handler: mux, ReadHeaderTimeout: 3 * time.Second}
+	addr := os.Getenv("QOS_AGENT_BIND")
+	if addr == "" {
+		addr = "127.0.0.1:9092"
+	}
+	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
 	go func() {
 		if e := server.ListenAndServe(); e != http.ErrServerClosed {
 			fmt.Println("lab API:", e)
@@ -355,7 +380,7 @@ func (a *labAgent) receive() {
 		udp := packet[ihl:]
 		port := int(binary.BigEndian.Uint16(udp[2:4]))
 		payload := udp[8:]
-		if len(payload) < 24 || binary.BigEndian.Uint32(payload[:4]) != labMagic {
+		if len(payload) < 24 || (binary.BigEndian.Uint32(payload[:4]) != labMagic && binary.BigEndian.Uint32(payload[:4]) != labProbeMagic) {
 			continue
 		}
 		now := time.Now()
@@ -372,18 +397,22 @@ func (a *labAgent) receive() {
 			a.mu.Unlock()
 			continue
 		}
+		if binary.BigEndian.Uint32(payload[:4]) == labProbeMagic {
+			rtt := float64(now.UnixNano()-int64(binary.BigEndian.Uint64(payload[16:24]))) / 1e6
+			f.lastRTT = &rtt
+			f.lastRTTAt = now
+			f.rttSum += rtt
+			f.rttCount++
+			a.mu.Unlock()
+			continue
+		}
 		epoch := uint64(binary.BigEndian.Uint32(payload[4:8]))
 		seq := binary.BigEndian.Uint64(payload[8:16])
-		if epoch != f.epoch {
-			f.epoch = epoch
-			f.lastSeq = seq
-			f.lastTransit = 0
-		} else if seq > f.lastSeq {
-			f.lost += seq - f.lastSeq - 1
+		if !f.acceptSequence(epoch, seq) {
+			a.mu.Unlock()
+			continue
 		}
-		if seq > f.lastSeq {
-			f.lastSeq = seq
-		}
+
 		f.received++
 		f.bytes += uint64(len(payload))
 		f.ipBytes += uint64(len(packet))
@@ -412,14 +441,28 @@ func (a *labAgent) sample() {
 			if f.received+f.lost > 0 {
 				loss = 100 * float64(f.lost) / float64(f.received+f.lost)
 			}
-			m := labMetric{Timestamp: now.UTC(), Throughput: float64(f.bytes) * 8 / dt / 1e6, IPThroughput: float64(f.ipBytes) * 8 / dt / 1e6, PacketLoss: loss, Jitter: f.jitter, RTT: a.lastRTT, Packets: f.received, QFI: f.qfi}
-			if now.Sub(a.lastRTTAt) > 6*time.Second {
+			missing := int64(f.lastSeq) - int64(f.unique)
+			expected := f.lastSeq - f.sampleHighest
+			lossDelta := missing - f.sampleMissing
+			f.sampleHighest = f.lastSeq
+			f.sampleMissing = missing
+			if expected > 0 {
+				loss = math.Max(0, 100*float64(lossDelta)/float64(expected))
+			}
+			m := labMetric{ExpectedPackets: expected, LossDelta: lossDelta, IntervalSeconds: dt, PayloadBytes: f.bytes, IPBytes: f.ipBytes, UniquePackets: f.unique, HighestSequence: f.lastSeq, Duplicates: f.duplicates, Reordered: f.reordered, RTTCount: f.rttCount, Epoch: f.epoch, Timestamp: now.UTC(), Throughput: float64(f.bytes) * 8 / dt / 1e6, IPThroughput: float64(f.ipBytes) * 8 / dt / 1e6, PacketLoss: loss, Jitter: f.jitter, RTT: f.lastRTT, Packets: f.received, QFI: f.qfi}
+			if f.rttCount > 0 {
+				avg := f.rttSum / float64(f.rttCount)
+				m.RTT = &avg
+			}
+			if now.Sub(f.lastRTTAt) > 6*time.Second {
 				m.RTT = nil
 			}
 			f.History = append(f.History, m)
 			if len(f.History) > 600 {
 				f.History = f.History[len(f.History)-600:]
 			}
+			f.rttSum = 0
+			f.rttCount = 0
 			f.received = 0
 			f.lost = 0
 			f.bytes = 0
@@ -428,22 +471,67 @@ func (a *labAgent) sample() {
 		a.mu.Unlock()
 	}
 }
+
+// A probe uses the same IPv4/UDP five-tuple as its application's downlink.
+// It is echoed by that sender socket, and is excluded from application bytes.
 func (a *labAgent) probe() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for range t.C {
-		payload := make([]byte, 24)
-		binary.BigEndian.PutUint32(payload, labMagic)
-		binary.BigEndian.PutUint64(payload[16:], uint64(time.Now().UnixNano()))
-		ip, e := labIPv4UDP(a.ip, "192.0.2.2", 6099, 5299, payload)
-		if e != nil {
-			continue
+		a.mu.Lock()
+		for _, f := range a.flows {
+			if !f.Flow.Enabled {
+				continue
+			}
+			payload := make([]byte, 24)
+			binary.BigEndian.PutUint32(payload, labProbeMagic)
+			binary.BigEndian.PutUint64(payload[16:], uint64(time.Now().UnixNano()))
+			ip, e := labIPv4UDP(a.ip, f.Flow.ServerIP, uint16(f.Flow.UEPort), uint16(f.Flow.ServerPort), payload)
+			if e != nil {
+				continue
+			}
+			qfi := f.qfi
+			if !a.activeQFIs[qfi] {
+				qfi = a.defaultQFI
+			}
+			head := []byte{0x34, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x85, 1, 0x10, qfi, 0}
+			binary.BigEndian.PutUint16(head[2:], uint16(len(ip)+8))
+			binary.BigEndian.PutUint32(head[4:], a.teid)
+			_, _ = a.conn.WriteToUDP(append(head, ip...), &net.UDPAddr{IP: net.ParseIP(uerancfg.N3Upf.Addr), Port: int(uerancfg.N3Upf.Port)})
 		}
-		head := []byte{0x34, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x85, 1, 0x10, a.defaultQFI, 0}
-		binary.BigEndian.PutUint16(head[2:], uint16(len(ip)+8))
-		binary.BigEndian.PutUint32(head[4:], a.teid)
-		_, _ = a.conn.WriteToUDP(append(head, ip...), &net.UDPAddr{IP: net.ParseIP(uerancfg.N3Upf.Addr), Port: int(uerancfg.N3Upf.Port)})
+		a.mu.Unlock()
 	}
+}
+
+// Keep an exact duplicate set for the bounded laboratory run. A sender epoch
+// change is explicit evidence of a restart, never silently a rate transition.
+func (f *receivedFlow) acceptSequence(epoch, seq uint64) bool {
+	if epoch != f.epoch || f.seen == nil {
+		f.epoch = epoch
+		f.sampleHighest = 0
+		f.sampleMissing = 0
+		f.lastSeq = 0
+		f.unique = 0
+		f.seen = map[uint64]bool{}
+		f.lastTransit = 0
+	}
+	if f.seen[seq] {
+		f.duplicates++
+		return false
+	}
+	f.seen[seq] = true
+	f.unique++
+	if seq < f.lastSeq {
+		f.reordered++
+		if f.lost > 0 {
+			f.lost--
+		}
+	}
+	if seq > f.lastSeq {
+		f.lost += seq - f.lastSeq - 1
+		f.lastSeq = seq
+	}
+	return true
 }
 func (a *labAgent) status(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
@@ -488,95 +576,14 @@ func (a *labAgent) flowControl(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-// The DN endpoint emits actual UDP datagrams through N6, the UPF and N3.
-func runLabSender() error {
-	type sender struct {
-		conn *net.UDPConn
-		stop chan struct{}
-	}
-	var mu sync.Mutex
-	senders := map[int]*sender{}
-	echo, e := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 5299})
-	if e != nil {
-		return e
-	}
-	defer echo.Close()
-	go func() {
-		b := make([]byte, 2048)
-		for {
-			n, peer, e := echo.ReadFromUDP(b)
-			if e != nil {
-				return
-			}
-			_, _ = echo.WriteToUDP(b[:n], peer)
-		}
-	}()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/flows", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			w.WriteHeader(405)
-			return
-		}
-		var f labFlow
-		if json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&f) != nil || net.ParseIP(f.UEIP).To4() == nil || f.ServerPort < 5200 || f.ServerPort > 5298 || f.UEPort < 6000 || f.UEPort > 6098 {
-			http.Error(w, "invalid flow", 400)
-			return
-		}
-		if f.Mbps <= 0 || f.Mbps > 100 {
-			f.Mbps = 30
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if old := senders[f.ServerPort]; old != nil {
-			close(old.stop)
-			old.conn.Close()
-			delete(senders, f.ServerPort)
-		}
-		if !f.Enabled {
-			w.WriteHeader(200)
-			return
-		}
-		c, e := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: f.ServerPort}, &net.UDPAddr{IP: net.ParseIP(f.UEIP), Port: f.UEPort})
-		if e != nil {
-			http.Error(w, e.Error(), 500)
-			return
-		}
-		s := &sender{c, make(chan struct{})}
-		senders[f.ServerPort] = s
-		go func() {
-			t := time.NewTicker(time.Millisecond)
-			defer t.Stop()
-			b := make([]byte, labPayload)
-			binary.BigEndian.PutUint32(b, labMagic)
-			binary.BigEndian.PutUint32(b[4:], uint32(time.Now().UnixNano()))
-			var seq uint64
-			start := time.Now()
-			for {
-				select {
-				case <-s.stop:
-					return
-				case now := <-t.C:
-					target := uint64(now.Sub(start).Seconds() * f.Mbps * 1e6 / (labPayload * 8))
-					for seq < target {
-						seq++
-						binary.BigEndian.PutUint64(b[8:], seq)
-						binary.BigEndian.PutUint64(b[16:], uint64(time.Now().UnixNano()))
-						if _, e := c.Write(b); e != nil {
-							return
-						}
-					}
-				}
-			}
-		}()
-		w.WriteHeader(200)
-	})
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
-	return (&http.Server{Addr: ":9093", Handler: mux, ReadHeaderTimeout: 3 * time.Second}).ListenAndServe()
-}
-
 func labNGSetup() ([]byte, error) {
 	p := ngapTestpacket.BuildNGSetupRequest()
 	for _, ie := range p.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List {
+		if v := ie.Value.GlobalRANNodeID; v != nil && v.GlobalGNBID != nil {
+			id := uint32(uerancfg.NgapID)
+			v.GlobalGNBID.GNBID.GNBID.Bytes = []byte{byte(id >> 16), byte(id >> 8), byte(id)}
+			v.GlobalGNBID.GNBID.GNBID.BitLength = 24
+		}
 		if ie.Value.SupportedTAList == nil {
 			continue
 		}
